@@ -1,0 +1,21 @@
+
+# Ignore Python cache, venv, logs, and sensitive files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+botenv/
+.env
+trades.log
+position_state.json
+daily_stats.json
+historical_klines.csv
+.git
+.gitignore
+*.db
+*.sqlite3
+*.egg-info/
+*.log
+docker-compose.yml
+README.md
+

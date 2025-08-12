@@ -1,0 +1,11 @@
+pandas
+numpy
+ta
+python-binance
+scikit-learn
+python-dotenv
+python-binance[async]
+cryptography
+tenacity
+aiohttp
+
