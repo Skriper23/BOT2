@@ -465,7 +465,18 @@ def format_quantity_for_binance(quantity, step_size=0.00001):
             # Ensure we don't exceed the step size by rounding down to nearest step
             adjusted_quantity = (int(quantity / step_size)) * step_size
             # Format with appropriate precision
-            return f"{adjusted_quantity:.{precision}f}".rstrip('0').rstrip('.')
+            formatted = f"{adjusted_quantity:.{precision}f}"
+            # Avoid stripping to empty string ("0") which would create invalid parameter
+            # Keep at least one non-zero or the minimal step representation
+            if float(formatted) <= 0:
+                # Return minimal tradable step as fallback (still may fail if below minQty; caller must validate)
+                minimal = f"{step_size:.{precision}f}"
+                return minimal
+            # Trim only trailing zeros but keep at least one decimal if needed
+            if '.' in formatted:
+                formatted_trim = formatted.rstrip('0').rstrip('.')
+                return formatted_trim if formatted_trim not in ('', '0') else formatted
+            return formatted
     except Exception as e:
         print(f"[WARNING] Error formatting quantity {quantity} with step {step_size}: {e}")
         # Fallback to 6 decimal places
@@ -570,6 +581,8 @@ async def execute_buy_order(quantity, is_exit_order=False):
             if not ok:
                 raise ValueError(f"Exit buy quantity invalid: {msg}")
             formatted_quantity = format_quantity_for_binance(normalized_qty, step_size)
+            if not formatted_quantity or float(formatted_quantity) <= 0:
+                raise ValueError(f"Formatted exit buy quantity invalid/empty: '{formatted_quantity}' from {normalized_qty}")
             print(f"[BUY EXIT] raw={raw_qty:.8f} norm={formatted_quantity} price={current_price:.2f} msg={msg}")
             order = await client.order_market_buy(symbol=symbol, quantity=formatted_quantity)
         else:
@@ -611,6 +624,8 @@ async def execute_sell_order(quantity):
         if not ok:
             raise ValueError(f"Sell quantity invalid: {msg}")
         formatted_quantity = format_quantity_for_binance(normalized_qty, step_size)
+        if not formatted_quantity or float(formatted_quantity) <= 0:
+            raise ValueError(f"Formatted sell quantity invalid/empty: '{formatted_quantity}' from {normalized_qty}")
         if raw_qty != quantity:
             print(f"[SELL ADJUST] req={quantity:.6f} raw={raw_qty:.6f}")
         print(f"[SELL ORDER] raw={raw_qty:.8f} norm={formatted_quantity} msg={msg}")
