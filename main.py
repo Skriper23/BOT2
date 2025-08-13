@@ -456,27 +456,34 @@ async def get_symbol_info(symbol="BTCUSDC"):
 def format_quantity_for_binance(quantity, step_size=0.00001):
     """Format quantity according to Binance step size requirements"""
     try:
+        # Derive precision robustly (handle scientific notation) by expanding to 16 decimals then trimming
         if step_size >= 1:
-            # For step sizes >= 1, round to integer
-            return str(int(quantity))
+            precision = 0
         else:
-            # For decimal step sizes, calculate the required precision
-            precision = len(str(step_size).rstrip('0').split('.')[-1]) if '.' in str(step_size) else 0
-            # Ensure we don't exceed the step size by rounding down to nearest step
-            adjusted_quantity = (int(quantity / step_size)) * step_size
-            # Format with appropriate precision
-            formatted = f"{adjusted_quantity:.{precision}f}"
-            # Avoid stripping to empty string ("0") which would create invalid parameter
-            # Keep at least one non-zero or the minimal step representation
-            if float(formatted) <= 0:
-                # Return minimal tradable step as fallback (still may fail if below minQty; caller must validate)
-                minimal = f"{step_size:.{precision}f}"
-                return minimal
-            # Trim only trailing zeros but keep at least one decimal if needed
-            if '.' in formatted:
-                formatted_trim = formatted.rstrip('0').rstrip('.')
-                return formatted_trim if formatted_trim not in ('', '0') else formatted
-            return formatted
+            step_str = f"{step_size:.16f}".rstrip('0').rstrip('.')
+            if '.' in step_str:
+                precision = len(step_str.split('.')[1])
+            else:
+                precision = 0
+        if precision == 0:
+            # Integer step size
+            adjusted_quantity = math.floor(quantity / step_size) * step_size if step_size > 0 else int(quantity)
+            return str(int(adjusted_quantity))
+        # Floor to step
+        steps = math.floor(quantity / step_size)
+        adjusted_quantity = steps * step_size
+        # Format with derived precision
+        formatted = f"{adjusted_quantity:.{precision}f}"
+        # Guard: if formatting produced 0 but original quantity was positive and above one step, bump to one step
+        if float(formatted) == 0 and quantity >= step_size:
+            formatted = f"{step_size:.{precision}f}"
+        # Trim trailing zeros while keeping at least one decimal digit if needed
+        if '.' in formatted:
+            trimmed = formatted.rstrip('0').rstrip('.')
+            if trimmed in ('', '0'):
+                return formatted  # keep original to avoid empty
+            return trimmed
+        return formatted
     except Exception as e:
         print(f"[WARNING] Error formatting quantity {quantity} with step {step_size}: {e}")
         # Fallback to 6 decimal places
@@ -623,6 +630,10 @@ async def execute_sell_order(quantity):
         normalized_qty, ok, msg = normalize_quantity(symbol_info, raw_qty, price=await get_price())
         if not ok:
             raise ValueError(f"Sell quantity invalid: {msg}")
+        lot = symbol_info['filters'].get('lot_size', {})
+        print(f"[SELL DEBUG] step_size={lot.get('step_size')} min_qty={lot.get('min_qty')} raw_qty={raw_qty} normalized_qty={normalized_qty}")
+        if normalized_qty < min_qty:
+            raise ValueError(f"Normalized quantity {normalized_qty} below minQty {min_qty}")
         formatted_quantity = format_quantity_for_binance(normalized_qty, step_size)
         if not formatted_quantity or float(formatted_quantity) <= 0:
             raise ValueError(f"Formatted sell quantity invalid/empty: '{formatted_quantity}' from {normalized_qty}")
