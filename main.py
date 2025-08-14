@@ -73,7 +73,7 @@ stale_exit_max_abs_change = 0.0015 # 0.15% band regarded as stagnant
 # Daily trading limits
 max_trades_per_day = 10  # Maximum number of trades per day (better for 6% target)
 max_daily_loss = 0.065  # Maximum daily loss (6.5% - safety buffer for 10 trades)
-daily_profit_target = 100  # Daily profit target (6% - much more achievable now)
+daily_profit_target = 0.06  # Daily profit target (6% - much more achievable now)
 trade_cooldown_minutes = 20  # Reduced to 20 minutes (allows 10 trades in 3+ hours)
 
 # File for accumulating all historical klines
