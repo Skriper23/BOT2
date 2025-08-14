@@ -199,12 +199,18 @@ def create_new_daily_stats(date):
     return {
         "date": date,
         "trades_count": 0,
-        "total_pnl": 0.0,
+    # Absolute PnL in quote currency (USDC)
+    "total_pnl_abs": 0.0,
+    # PnL percentage relative to starting equity of the day
+    "total_pnl_pct": 0.0,
         "wins": 0,
         "losses": 0,
         "last_trade_time": None,
         "daily_limit_hit": False,
         "profit_target_hit": False,
+    # Equity tracking for correct % thresholds
+    "starting_equity": None,
+    "last_equity": None,
     }
 
 
@@ -217,21 +223,43 @@ def save_daily_stats(stats):
         print(f"Error saving daily stats: {e}")
 
 
+def format_pnl_text(stats):
+    """Return human-friendly PnL string based on available fields."""
+    if stats.get("starting_equity") and stats.get("total_pnl_pct") is not None:
+        return f"{stats['total_pnl_pct']:.2f}% (abs ${stats.get('total_pnl_abs', 0.0):.2f})"
+    # legacy fallback
+    if "total_pnl" in stats:
+        try:
+            return f"${stats['total_pnl']:.2f}"
+        except Exception:
+            pass
+    return f"${stats.get('total_pnl_abs', 0.0):.2f}"
+
+
 def can_trade():
     """Check if trading is allowed based on daily limits"""
     stats = get_daily_stats()
+    # If starting_equity exists, enforce % thresholds; else use absolute as fallback
 
     # Check daily trade limit
     if stats["trades_count"] >= max_trades_per_day:
         return False, "Daily trade limit reached"
 
-    # Check daily loss limit
-    if stats["total_pnl"] <= -max_daily_loss:
-        return False, "Daily loss limit reached"
-
-    # Check if profit target hit (optional - remove if you want to keep trading)
-    if stats["profit_target_hit"]:
-        return False, "Daily profit target achieved"
+    # Self-heal: if profit_target_hit is True but PnL% is below target, reset flag
+    if stats.get("starting_equity") and stats.get("total_pnl_pct") is not None:
+        if stats.get("profit_target_hit") and stats["total_pnl_pct"] < daily_profit_target * 100:
+            stats["profit_target_hit"] = False
+            save_daily_stats(stats)
+    # Check % limits only if we have starting_equity
+    if stats.get("starting_equity") and stats.get("total_pnl_pct") is not None:
+        if stats["total_pnl_pct"] <= -max_daily_loss * 100:
+            return False, "Daily loss limit reached"
+        if stats.get("profit_target_hit"):
+            return False, "Daily profit target achieved"
+    else:
+        # Fallback absolute if % not available yet
+        if stats.get("total_pnl_abs", 0.0) <= -max_daily_loss:
+            return False, "Daily loss limit reached"
 
     # Check cooldown period
     if stats["last_trade_time"]:
@@ -261,7 +289,7 @@ Daily Trading Summary for {stats["date"]}
 
 📊 STATISTICS:
 • Total Trades: {stats["trades_count"]}/{max_trades_per_day}
-• Total PnL: {stats["total_pnl"]:.4f} ({stats["total_pnl"]:.2%})
+• Total PnL: {format_pnl_text(stats)}
 • Wins: {stats["wins"]} | Losses: {stats["losses"]}
 • Win Rate: {win_rate:.1f}%
 
@@ -275,8 +303,7 @@ Daily Trading Summary for {stats["date"]}
 • Profit Target Hit: {"Yes" if stats["profit_target_hit"] else "No"}
 • Last Trade: {stats["last_trade_time"] or "None"}
 
-Bot Status: {"SUSPENDED" if stats["daily_limit_hit"] or stats["" \
-""] else "ACTIVE"}
+Bot Status: {"SUSPENDED" if stats["daily_limit_hit"] or stats["profit_target_hit"] else "ACTIVE"}
     """
 
     print("[DAILY SUMMARY]")
@@ -565,6 +592,16 @@ async def get_account_balance():
         return 0.0, 0.0
 
 
+async def get_equity_usdc():
+    """Return total equity valued in USDC (USDC + BTC*price)."""
+    usdc, btc = await get_account_balance()
+    try:
+        price = await get_price()
+    except Exception:
+        price = 0.0
+    return usdc + btc * price
+
+
 async def execute_buy_order(quantity, is_exit_order=False):
     """Execute a market buy order for BTC using USDC"""
     try:
@@ -719,7 +756,7 @@ async def execute_trade(side):
         stats["daily_limit_hit"] = True
         print(f"[DAILY LIMIT] Maximum trades per day ({max_trades_per_day}) reached!")
     save_daily_stats(stats)
-    print(f"[DAILY STATS] Trades: {stats['trades_count']}/{max_trades_per_day} | PnL: {stats['total_pnl']:.6f} | W/L: {stats['wins']}/{stats['losses']}")
+    print(f"[DAILY STATS] Trades: {stats['trades_count']}/{max_trades_per_day} | PnL: {format_pnl_text(stats)} | W/L: {stats['wins']}/{stats['losses']}")
     stats = get_daily_stats()
     win_rate = ((stats["wins"] / max(stats["trades_count"], 1)) * 100 if stats["trades_count"] > 0 else 0)
     new_usdc_balance, new_btc_balance = await get_account_balance()
@@ -733,7 +770,7 @@ Daily Trading Summary for {stats['date']}
 
 📊 STATISTICS:
 • Total Trades: {stats['trades_count']}/{max_trades_per_day}
-• Total PnL: {stats['total_pnl']:.4f} ({stats['total_pnl']:.2%})
+• Total PnL: {format_pnl_text(stats)}
 • Wins: {stats['wins']} | Losses: {stats['losses']}
 • Win Rate: {win_rate:.1f}%
 
@@ -761,6 +798,10 @@ Bot Status: {'SUSPENDED' if stats['daily_limit_hit'] or stats['profit_target_hit
 async def monitor_position(entry_price, side, position_data=None):
     """Monitor position with separate functions for each exit strategy"""
     global quantity
+    if side != "BUY":
+        print(f"[SPOT-ONLY] Non-BUY position detected in monitor ({side}). Clearing and returning.")
+        clear_position_state()
+        return
     
     # Get the actual BTC quantity from position data if available
     if position_data and 'btc_quantity' in position_data:
@@ -785,8 +826,8 @@ async def monitor_position(entry_price, side, position_data=None):
     position_size_usd = btc_quantity * entry_price
     
     # Position monitoring variables
-    # User-configured: minimum profit for signal-flip exit = 0.5%
-    min_profit_target = 0.005  # 0.5%
+    # Profit gate for signal-flip exit disabled per user request
+    min_profit_target = 0.0
     max_profit_seen = 0.0
     # Adaptive stepped failsafe tiers: (trigger_profit, locked_floor)
     failsafe_tiers = [
@@ -798,7 +839,7 @@ async def monitor_position(entry_price, side, position_data=None):
     failsafe_floor = None  # Updated when higher tiers reached
 
     print(f"[POSITION MONITORING] {side} position: Entry ${entry_price:.6f}, Size: {btc_quantity:.6f} BTC (${position_size_usd:.2f})")
-    print(f"[MONITORING THRESHOLDS] Stop Loss: {stop_loss*100:.6f}%, Min Profit (signal flip): {min_profit_target*100:.2f}%")
+    print(f"[MONITORING THRESHOLDS] Stop Loss: {stop_loss*100:.6f}%, Flip gate: none")
 
     # Add timeout to prevent infinite monitoring (24 hours max)
     start_time = time.time()
@@ -808,7 +849,7 @@ async def monitor_position(entry_price, side, position_data=None):
     while True:
         iteration_count += 1
         current_price = await get_price()
-        
+
         # Check for timeout
         elapsed_time = time.time() - start_time
         if elapsed_time > max_monitoring_time:
@@ -816,19 +857,18 @@ async def monitor_position(entry_price, side, position_data=None):
             print(f"Position monitoring has been running for {elapsed_time/3600:.6f} hours. Forcing position closure for safety.")
             clear_position_state()
             return
-        
-        # Calculate change based on position type
-        if side == "BUY":
-            # For BUY positions, profit when BTC price increases
-            change = (current_price - entry_price) / entry_price
-        else:  # SELL
-            # For SELL positions (holding USDC), profit when BTC price decreases (invert change)
-            change = -(current_price - entry_price) / entry_price  # Inverted for USDC holders
+
+        # BUY-only: profit when BTC price increases
+        change = (current_price - entry_price) / entry_price
 
         # Debug logging every 10 iterations (roughly every 50 seconds)
         if iteration_count % 10 == 1:
-            print(f"[MONITOR {iteration_count}] {side} | Entry: ${entry_price:.6f} | Current: ${current_price:.6f} | Change: {change*100:.3f}% | Max: {max_profit_seen*100:.3f}% | Floor: {failsafe_floor*100:.2f}%" if failsafe_floor is not None else f"[MONITOR {iteration_count}] {side} | Entry: ${entry_price:.6f} | Current: ${current_price:.6f} | Change: {change*100:.3f}% | Max: {max_profit_seen*100:.3f}%")
-            print(f"[THRESHOLDS] Stop: {-stop_loss*100:.6f}% | Min Profit: {min_profit_target*100:.2f}%")
+            print(
+                f"[MONITOR {iteration_count}] {side} | Entry: ${entry_price:.6f} | Current: ${current_price:.6f} | Change: {change*100:.3f}% | Max: {max_profit_seen*100:.3f}% | Floor: {failsafe_floor*100:.2f}%"
+                if failsafe_floor is not None
+                else f"[MONITOR {iteration_count}] {side} | Entry: ${entry_price:.6f} | Current: ${current_price:.6f} | Change: {change*100:.3f}% | Max: {max_profit_seen*100:.3f}%"
+            )
+            print(f"[THRESHOLDS] Stop: {-stop_loss*100:.6f}% | Flip gate: none")
 
         # Update max profit seen and failsafe threshold
         if change > max_profit_seen:
@@ -846,10 +886,7 @@ async def monitor_position(entry_price, side, position_data=None):
         if failsafe_floor is not None and change < failsafe_floor:
             exit_success, exit_price = await execute_failsafe_exit(side, current_price, max_profit_seen, failsafe_floor)
             if exit_success:
-                if side == "BUY":
-                    final_change = (exit_price - entry_price) / entry_price
-                else:
-                    final_change = -(exit_price - entry_price) / entry_price
+                final_change = (exit_price - entry_price) / entry_price
                 await finalize_exit("failsafe", side, exit_price, final_change, position_size_usd, max_profit_seen)
                 return
             else:
@@ -861,10 +898,7 @@ async def monitor_position(entry_price, side, position_data=None):
             exit_success, exit_price = await execute_stop_loss_exit(side, current_price, change)
             if exit_success:
                 # Recalculate change with actual exit price
-                if side == "BUY":
-                    final_change = (exit_price - entry_price) / entry_price
-                else:
-                    final_change = -(exit_price - entry_price) / entry_price
+                final_change = (exit_price - entry_price) / entry_price
                 await finalize_exit("stop_loss", side, exit_price, final_change, position_size_usd)
                 return
             else:
@@ -872,47 +906,13 @@ async def monitor_position(entry_price, side, position_data=None):
                 await asyncio.sleep(10)
                 continue
 
-        # 3. CHECK SIGNAL FLIP EXIT
-        try:
-            df = await fetch_klines()
-            prediction, _ = knn_predict(df)
-            
-            signal_flip_condition = ((side == "BUY" and prediction == 0) or (side == "SELL" and prediction == 1))
-            profit_condition = change >= min_profit_target
-            
-            if iteration_count % 10 == 1:  # Debug every 10 iterations
-                print(f"[SIGNAL CHECK] Current: {'BUY' if prediction == 1 else 'SELL'} | Position: {side} | Signal Flip: {signal_flip_condition} | Profit OK: {profit_condition}")
-            
-            if signal_flip_condition and profit_condition:
-                exit_success, exit_price = await execute_signal_flip_exit(side, current_price, change, prediction)
-                if exit_success:
-                    # Recalculate change with actual exit price
-                    if side == "BUY":
-                        final_change = (exit_price - entry_price) / entry_price
-                    else:
-                        final_change = -(exit_price - entry_price) / entry_price
-                    await finalize_exit("signal_flip", side, exit_price, final_change, position_size_usd)
-                    return
-                else:
-                    # Exit failed, wait and continue monitoring
-                    await asyncio.sleep(10)
-                    continue
-                    
-        except Exception as e:
-            print(f"[SIGNAL CHECK ERROR] Failed to check signal: {e}")
-            # Continue monitoring on prediction error
-
         # TIME-BASED STALE EXIT
-        elapsed_time = time.time() - start_time
         if (elapsed_time >= stale_exit_minutes * 60 and abs(change) < stale_exit_max_abs_change):
             print(f"[STALE EXIT] Elapsed {elapsed_time/60:.1f}m | Change {change*100:.3f}% < ±{stale_exit_max_abs_change*100:.2f}% -> Forcing exit")
-            # Use stop-loss exit machinery (market out) regardless of direction
+            # Use stop-loss exit machinery (market out)
             exit_success, exit_price = await execute_stop_loss_exit(side, current_price, change)
             if exit_success:
-                if side == 'BUY':
-                    final_change = (exit_price - entry_price) / entry_price
-                else:
-                    final_change = -(exit_price - entry_price) / entry_price
+                final_change = (exit_price - entry_price) / entry_price
                 await finalize_exit('stale_exit', side, exit_price, final_change, position_size_usd, max_profit_seen)
                 return
             else:
@@ -937,29 +937,17 @@ async def execute_failsafe_exit(side, current_price, max_profit_seen, failsafe_f
         order_executed = False
         actual_exit_price = current_price
         
-        if side == "BUY":
-            # We bought BTC, now sell it back to USDC
-            if btc_balance < 0.00001:
-                print(f"[FAILSAFE EXIT SKIPPED] Expected BTC but have {btc_balance:.6f} BTC")
-                print(f"CRITICAL: Failsafe triggered but no BTC in wallet! Balance: {btc_balance:.6f} BTC. Position may be stuck!")
-                return False, current_price
-            else:
-                available_btc = btc_balance * EXIT_ASSET_BUFFER
-                print(f"[FAILSAFE EXIT] Converting BTC→USDC: {available_btc:.6f} BTC at ${current_price:.6f}")
-                order = await execute_sell_order(available_btc)
-                order_executed = (order and order['status'] == 'FILLED')
-        else:  # SELL
-            # We sold BTC for USDC, now buy BTC back
-            if usdc_balance < 10:
-                print(f"[FAILSAFE EXIT SKIPPED] Expected USDC but have ${usdc_balance:.6f} USDC")
-                print(f"CRITICAL: Failsafe triggered but insufficient USDC! Balance: ${usdc_balance:.6f}. Position may be stuck!")
-                return False, current_price
-            else:
-                available_usdc = usdc_balance * ENTRY_QUOTE_BUFFER
-                max_buyable = available_usdc / current_price
-                print(f"[FAILSAFE EXIT] Converting USDC→BTC: ${available_usdc:.6f} → {max_buyable:.6f} BTC at ${current_price:.2f}")
-                order = await execute_buy_order(max_buyable, is_exit_order=True)
-                order_executed = (order and order['status'] == 'FILLED')
+        # BUY-only: sell BTC back to USDC
+        if side != "BUY":
+            print(f"[SPOT-ONLY] Failsafe called with non-BUY side ({side}); skipping.")
+            return False, current_price
+        if btc_balance < 0.00001:
+            print(f"[FAILSAFE EXIT SKIPPED] Expected BTC but have {btc_balance:.6f} BTC")
+            return False, current_price
+        available_btc = btc_balance * EXIT_ASSET_BUFFER
+        print(f"[FAILSAFE EXIT] Converting BTC→USDC: {available_btc:.6f} BTC at ${current_price:.6f}")
+        order = await execute_sell_order(available_btc)
+        order_executed = (order and order['status'] == 'FILLED')
         
         if order_executed:
             actual_exit_price = float(order['fills'][0]['price']) if order['fills'] else current_price
@@ -990,29 +978,17 @@ async def execute_stop_loss_exit(side, current_price, change):
         order_executed = False
         actual_exit_price = current_price
         
-        if side == "BUY":
-            # We bought BTC, now sell it back to USDC (cut losses)
-            if btc_balance < 0.00001:
-                print(f"[STOP LOSS EXIT SKIPPED] Expected BTC but have {btc_balance:.6f} BTC")
-                print(f"CRITICAL: Stop loss triggered but no BTC in wallet! Balance: {btc_balance:.6f} BTC. Position may be stuck!")
-                return False, current_price
-            else:
-                available_btc = btc_balance * EXIT_ASSET_BUFFER
-                print(f"[STOP LOSS EXIT] Converting BTC→USDC: {available_btc:.6f} BTC at ${current_price:.6f}")
-                order = await execute_sell_order(available_btc)
-                order_executed = (order and order['status'] == 'FILLED')
-        else:  # SELL
-            # We sold BTC for USDC, now buy BTC back (cut losses)
-            if usdc_balance < 10:
-                print(f"[STOP LOSS EXIT SKIPPED] Expected USDC but have ${usdc_balance:.6f} USDC")
-                print(f"CRITICAL: Stop loss triggered but insufficient USDC! Balance: ${usdc_balance:.6f}. Position may be stuck!")
-                return False, current_price
-            else:
-                available_usdc = usdc_balance * ENTRY_QUOTE_BUFFER
-                max_buyable = available_usdc / current_price
-                print(f"[STOP LOSS EXIT] Converting USDC→BTC: ${available_usdc:.6f} → {max_buyable:.6f} BTC at ${current_price:.2f}")
-                order = await execute_buy_order(max_buyable, is_exit_order=True)
-                order_executed = (order and order['status'] == 'FILLED')
+        # BUY-only: sell BTC back to USDC (cut losses)
+        if side != "BUY":
+            print(f"[SPOT-ONLY] Stop-loss called with non-BUY side ({side}); skipping.")
+            return False, current_price
+        if btc_balance < 0.00001:
+            print(f"[STOP LOSS EXIT SKIPPED] Expected BTC but have {btc_balance:.6f} BTC")
+            return False, current_price
+        available_btc = btc_balance * EXIT_ASSET_BUFFER
+        print(f"[STOP LOSS EXIT] Converting BTC→USDC: {available_btc:.6f} BTC at ${current_price:.6f}")
+        order = await execute_sell_order(available_btc)
+        order_executed = (order and order['status'] == 'FILLED')
         
         if order_executed:
             actual_exit_price = float(order['fills'][0]['price']) if order['fills'] else current_price
@@ -1029,57 +1005,6 @@ async def execute_stop_loss_exit(side, current_price, change):
         return False, current_price
 
 
-async def execute_signal_flip_exit(side, current_price, change, prediction):
-    """Execute signal flip exit"""
-    print(f"[SIGNAL FLIP TRIGGER] Signal changed to {'SELL' if side == 'BUY' else 'BUY'}, profit: {change*100:.2f}%")
-    
-    if paper_trading:
-        print("[SIGNAL FLIP EXIT] Simulated - would exit position")
-        return True, current_price
-    
-    try:
-        # Get current balances to handle dust properly
-        usdc_balance, btc_balance = await get_account_balance()
-        order_executed = False
-        actual_exit_price = current_price
-        
-        if side == "BUY":
-            # We bought BTC, now sell it back to USDC (signal changed)
-            if btc_balance < 0.00001:
-                print(f"[SIGNAL FLIP EXIT SKIPPED] Expected BTC but have {btc_balance:.6f} BTC")
-                print(f"CRITICAL: Signal flip triggered but no BTC in wallet! Balance: {btc_balance:.6f} BTC. Position may be stuck!")
-                return False, current_price
-            else:
-                available_btc = btc_balance * EXIT_ASSET_BUFFER
-                print(f"[SIGNAL FLIP EXIT] Converting BTC→USDC: {available_btc:.6f} BTC at ${current_price:.2f}")
-                order = await execute_sell_order(available_btc)
-                order_executed = (order and order['status'] == 'FILLED')
-        else:  # SELL
-            # We sold BTC for USDC, now buy BTC back (signal changed)
-            if usdc_balance < 10:
-                print(f"[SIGNAL FLIP EXIT SKIPPED] Expected USDC but have ${usdc_balance:.6f} USDC")
-                print(f"CRITICAL: Signal flip triggered but insufficient USDC! Balance: ${usdc_balance:.6f}. Position may be stuck!")
-                return False, current_price
-            else:
-                available_usdc = usdc_balance * ENTRY_QUOTE_BUFFER
-                max_buyable = available_usdc / current_price
-                print(f"[SIGNAL FLIP EXIT] Converting USDC→BTC: ${available_usdc:.6f} → {max_buyable:.6f} BTC at ${current_price:.2f}")
-                order = await execute_buy_order(max_buyable, is_exit_order=True)
-                order_executed = (order and order['status'] == 'FILLED')
-        
-        if order_executed:
-            actual_exit_price = float(order['fills'][0]['price']) if order['fills'] else current_price
-            print(f"[SIGNAL FLIP EXIT EXECUTED] at ${actual_exit_price:.6f}")
-            return True, actual_exit_price
-        else:
-            print(f"[SIGNAL FLIP EXIT FAILED] Order status: {order['status'] if order else 'None'}")
-            print(f"Failed to execute signal flip exit order for {side} position")
-            return False, current_price
-            
-    except Exception as e:
-        print(f"[SIGNAL FLIP EXIT ERROR] {e}")
-        print(f"Failed to execute signal flip exit: {str(e)}")
-        return False, current_price
 
 
 ## Removed update_failsafe_threshold in favor of stepped adaptive failsafe floors
@@ -1097,10 +1022,7 @@ async def finalize_exit(exit_type, side, current_price, change, position_size_us
         await log_trade("Stop Loss", current_price, change * position_size_usd)
         subject = f"[Trading Bot] Stop Loss Triggered"
         body = f"Stop loss executed for {side} at price: {current_price:.2f}\nPnL: {change * position_size_usd:.4f}"
-    elif exit_type == "signal_flip":
-        await log_trade("Take Profit (Signal Flip)", current_price, change * position_size_usd)
-        subject = f"[Trading Bot] Take Profit Triggered"
-        body = f"Take profit executed for {side} at price: {current_price:.2f}\nPnL: {change * position_size_usd:.4f}"
+    # signal_flip removed
     elif exit_type == "stale_exit":
         await log_trade("Stale Exit", current_price, change * position_size_usd, reason="Time-based forced exit")
         subject = f"[Trading Bot] Stale Position Exit"
@@ -1108,16 +1030,35 @@ async def finalize_exit(exit_type, side, current_price, change, position_size_us
     
     # Update daily statistics
     stats = get_daily_stats()
-    stats["total_pnl"] += change * position_size_usd
-    if change * position_size_usd > 0:
+    pnl_abs = change * position_size_usd
+    stats["total_pnl_abs"] = stats.get("total_pnl_abs", 0.0) + pnl_abs
+    # Update equity-based PnL%
+    try:
+        # compute current equity and pct if starting_equity is set
+        current_equity = await get_equity_usdc()
+        stats["last_equity"] = current_equity
+        if stats.get("starting_equity"):
+            base = stats["starting_equity"]
+            if base > 0:
+                stats["total_pnl_pct"] = ((current_equity - base) / base) * 100.0
+    except Exception:
+        pass
+    if pnl_abs > 0:
         stats["wins"] += 1
     else:
         stats["losses"] += 1
-    # Update flags for daily limits / targets
-    if stats["total_pnl"] <= -max_daily_loss:
-        stats["daily_limit_hit"] = True
-    if stats["total_pnl"] >= daily_profit_target:
-        stats["profit_target_hit"] = True
+    # Update flags for daily limits / targets based on % if available
+    if stats.get("total_pnl_pct") is not None and stats.get("starting_equity"):
+        if stats["total_pnl_pct"] <= -max_daily_loss * 100:
+            stats["daily_limit_hit"] = True
+        if stats["total_pnl_pct"] >= daily_profit_target * 100:
+            stats["profit_target_hit"] = True
+    else:
+        # fallback absolute thresholds (legacy)
+        if stats.get("total_pnl_abs", 0.0) <= -max_daily_loss:
+            stats["daily_limit_hit"] = True
+        if stats.get("total_pnl_abs", 0.0) >= daily_profit_target:
+            stats["profit_target_hit"] = True
     save_daily_stats(stats)
     
     # Clear position state
@@ -1232,6 +1173,19 @@ async def run_bot():
         print("Bot cannot function without API access. Exiting...")
         return
 
+    # Initialize starting equity for the day if not set
+    stats_init = get_daily_stats()
+    if not stats_init.get("starting_equity"):
+        try:
+            eq = await get_equity_usdc()
+            stats_init["starting_equity"] = eq
+            stats_init["last_equity"] = eq
+            stats_init["total_pnl_pct"] = 0.0
+            save_daily_stats(stats_init)
+            print(f"[EQUITY INIT] Starting equity for {stats_init['date']}: ${eq:.2f}")
+        except Exception as e:
+            print(f"[EQUITY INIT ERROR] {e}")
+
     existing_position = load_position_state()
     if existing_position:
         print(
@@ -1256,7 +1210,11 @@ async def run_bot():
             current_datetime = datetime.now()
             if current_time - last_heartbeat > heartbeat_interval:
                 stats = get_daily_stats()
-                print(f"[HEARTBEAT {current_datetime.strftime('%H:%M:%S')}] Bot alive - Trades: {stats['trades_count']}/{max_trades_per_day} | PnL: {stats['total_pnl']:.4f}")
+                pnl_text = (
+                    f"{stats.get('total_pnl_pct', 0):.2f}%"
+                    if stats.get('starting_equity') and stats.get('total_pnl_pct') is not None else f"${stats.get('total_pnl_abs', 0.0):.4f}"
+                )
+                print(f"[HEARTBEAT {current_datetime.strftime('%H:%M:%S')}] Bot alive - Trades: {stats['trades_count']}/{max_trades_per_day} | PnL: {pnl_text}")
                 last_heartbeat = current_time
             
             # Send daily summary at start of new day
@@ -1267,6 +1225,19 @@ async def run_bot():
                 except Exception as e:
                     print(f"[ERROR] Failed to send daily summary: {e}")
             last_summary_date = current_date
+
+            # Reset starting equity at day roll if date changed
+            stats = get_daily_stats()
+            if stats.get('date') != current_date:
+                try:
+                    eq = await get_equity_usdc()
+                    new_stats = create_new_daily_stats(current_date)
+                    new_stats['starting_equity'] = eq
+                    new_stats['last_equity'] = eq
+                    save_daily_stats(new_stats)
+                    print(f"[EQUITY RESET] New day {current_date}, starting equity: ${eq:.2f}")
+                except Exception as e:
+                    print(f"[EQUITY RESET ERROR] {e}")
 
             can_trade_now, reason = can_trade()
             if not can_trade_now:
@@ -1300,8 +1271,7 @@ async def run_bot():
             print(f"[KNN PREDICTION {current_datetime.strftime('%H:%M:%S')}] {'BUY' if prediction == 1 else 'SELL'}")
 
             if prediction == 1:
-                # BUY signal: Convert USDC to BTC
-                # SPOT TRADING (CURRENT)
+                # BUY signal: Convert USDC to BTC (spot-long only)
                 try:
                     price = await execute_trade("BUY")
                     if price:  # Only monitor if trade was successful
@@ -1309,17 +1279,9 @@ async def run_bot():
                 except Exception as e:
                     print(f"[ERROR] BUY trade execution failed: {e}")
                     print(f"BUY trade failed: {str(e)}")
-                
             else:
-                # SELL signal: Convert BTC to USDC
-                # SPOT TRADING (CURRENT)
-                try:
-                    price = await execute_trade("SELL")
-                    if price:  # Only monitor if trade was successful
-                        await monitor_position(price, "SELL")
-                except Exception as e:
-                    print(f"[ERROR] SELL trade execution failed: {e}")
-                    print(f"SELL trade failed: {str(e)}")
+                # Spot-only mode: ignore SELL prediction; hold or wait for next BUY
+                print(f"[SPOT-ONLY] SELL signal ignored; waiting for BUY.")
 
             # Sleep for a shorter interval to check for trades more frequently
             await asyncio.sleep(60)  # Check every 1 minute instead of 15 minutes
