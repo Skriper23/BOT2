@@ -56,7 +56,7 @@ interval = AsyncClient.KLINE_INTERVAL_1MINUTE
 quantity = None  # Will be set dynamically before each trade
 lookback = 150
 k_neighbors = 5  # Kolko K bude KNN uzel više K više procesing powera
-stop_loss = 0.006  # 0.6% stop loss (1:2 risk/reward ratio)
+stop_loss = 0.005  # 0.5% stop loss
 log_file = "trades.log"
 position_file = "position_state.json"
 daily_stats_file = "daily_stats.json"
@@ -686,6 +686,35 @@ async def execute_sell_order(quantity):
         raise e
 
 
+async def execute_take_profit_exit(side, current_price, change):
+    """Execute fixed take profit exit for BUY positions"""
+    print(f"[TAKE PROFIT TRIGGER] Current change: {change*100:.3f}%")
+
+    if paper_trading:
+        print("[TAKE PROFIT EXIT] Simulated - would exit position")
+        return True, current_price
+
+    try:
+        usdc_balance, btc_balance = await get_account_balance()
+        if side != "BUY":
+            print(f"[SPOT-ONLY] Take-profit called with non-BUY side ({side}); skipping.")
+            return False, current_price
+        if btc_balance < 0.00001:
+            print(f"[TAKE PROFIT EXIT SKIPPED] Expected BTC but have {btc_balance:.6f} BTC")
+            return False, current_price
+        available_btc = btc_balance * EXIT_ASSET_BUFFER
+        print(f"[TAKE PROFIT EXIT] Converting BTC→USDC: {available_btc:.6f} BTC at ${current_price:.6f}")
+        order = await execute_sell_order(available_btc)
+        if order and order['status'] == 'FILLED':
+            actual_exit_price = float(order['fills'][0]['price']) if order['fills'] else current_price
+            return True, actual_exit_price
+        print(f"[TAKE PROFIT EXIT FAILED] Status: {order['status'] if order else 'None'}")
+        return False, current_price
+    except Exception as e:
+        print(f"[TAKE PROFIT EXIT ERROR] {e}")
+        return False, current_price
+
+
 async def execute_trade(side):
     price = await get_price()
     global quantity
@@ -826,20 +855,19 @@ async def monitor_position(entry_price, side, position_data=None):
     position_size_usd = btc_quantity * entry_price
     
     # Position monitoring variables
-    # Profit gate for signal-flip exit disabled per user request
-    min_profit_target = 0.0
+    # Fixed take-profit target (non-trailing)
+    take_profit_target = 0.015  # 1.5%
     max_profit_seen = 0.0
     # Adaptive stepped failsafe tiers: (trigger_profit, locked_floor)
     failsafe_tiers = [
-        (0.005, 0.003),   # Reach 0.50% -> lock 0.30%
-        (0.0075, 0.005),  # Reach 0.75% -> lock 0.50%
-        (0.010, 0.007),   # Reach 1.00% -> lock 0.70%
-        (0.0125, 0.009),  # Reach 1.25% -> lock 0.90%
+        (0.006, 0.006),   # Hit 0.60% -> lock 0.60%
+        (0.010, 0.010),   # Hit 1.00% -> lock 1.00%
+        (0.012, 0.012),   # Hit 1.20% -> lock 1.20%
     ]
     failsafe_floor = None  # Updated when higher tiers reached
 
     print(f"[POSITION MONITORING] {side} position: Entry ${entry_price:.6f}, Size: {btc_quantity:.6f} BTC (${position_size_usd:.2f})")
-    print(f"[MONITORING THRESHOLDS] Stop Loss: {stop_loss*100:.6f}%, Flip gate: none")
+    print(f"[MONITORING THRESHOLDS] Stop Loss: {stop_loss*100:.6f}%, Take Profit: {take_profit_target*100:.2f}%")
 
     # Add timeout to prevent infinite monitoring (24 hours max)
     start_time = time.time()
@@ -893,7 +921,18 @@ async def monitor_position(entry_price, side, position_data=None):
                 await asyncio.sleep(10)
                 continue
 
-        # 2. CHECK STOP LOSS
+        # 2. FIXED TAKE PROFIT (non-trailing)
+        if change >= take_profit_target:
+            exit_success, exit_price = await execute_take_profit_exit(side, current_price, change)
+            if exit_success:
+                final_change = (exit_price - entry_price) / entry_price
+                await finalize_exit("take_profit", side, exit_price, final_change, position_size_usd)
+                return
+            else:
+                await asyncio.sleep(10)
+                continue
+
+        # 3. CHECK STOP LOSS
         if change <= -stop_loss:
             exit_success, exit_price = await execute_stop_loss_exit(side, current_price, change)
             if exit_success:
@@ -906,7 +945,7 @@ async def monitor_position(entry_price, side, position_data=None):
                 await asyncio.sleep(10)
                 continue
 
-        # TIME-BASED STALE EXIT
+    # TIME-BASED STALE EXIT
         if (elapsed_time >= stale_exit_minutes * 60 and abs(change) < stale_exit_max_abs_change):
             print(f"[STALE EXIT] Elapsed {elapsed_time/60:.1f}m | Change {change*100:.3f}% < ±{stale_exit_max_abs_change*100:.2f}% -> Forcing exit")
             # Use stop-loss exit machinery (market out)
@@ -1022,6 +1061,10 @@ async def finalize_exit(exit_type, side, current_price, change, position_size_us
         await log_trade("Stop Loss", current_price, change * position_size_usd)
         subject = f"[Trading Bot] Stop Loss Triggered"
         body = f"Stop loss executed for {side} at price: {current_price:.2f}\nPnL: {change * position_size_usd:.4f}"
+    elif exit_type == "take_profit":
+        await log_trade("Take Profit", current_price, change * position_size_usd)
+        subject = f"[Trading Bot] Take Profit Triggered"
+        body = f"Take profit executed for {side} at price: {current_price:.2f}\nPnL: {change * position_size_usd:.4f}"
     # signal_flip removed
     elif exit_type == "stale_exit":
         await log_trade("Stale Exit", current_price, change * position_size_usd, reason="Time-based forced exit")
