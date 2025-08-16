@@ -55,7 +55,7 @@ interval = AsyncClient.KLINE_INTERVAL_1MINUTE
 # Legacy fixed trade size removed; bot now uses dynamic 100% available balance sizing
 quantity = None  # Will be set dynamically before each trade
 lookback = 400
-k_neighbors = 12  # Kolko K bude KNN uzel više K više procesing powera
+k_neighbors = 11  # Kolko K bude KNN uzel više K više procesing powera
 stop_loss = 0.005  # 0.5% stop loss
 log_file = "trades.log"
 position_file = "position_state.json"
