@@ -54,8 +54,8 @@ interval = AsyncClient.KLINE_INTERVAL_1MINUTE
 # Trade with $100 worth of BTC per trade (quantity will be calculated dynamically)
 # Legacy fixed trade size removed; bot now uses dynamic 100% available balance sizing
 quantity = None  # Will be set dynamically before each trade
-lookback = 150
-k_neighbors = 5  # Kolko K bude KNN uzel više K više procesing powera
+lookback = 500
+k_neighbors = 15  # Kolko K bude KNN uzel više K više procesing powera
 stop_loss = 0.005  # 0.5% stop loss
 log_file = "trades.log"
 position_file = "position_state.json"
