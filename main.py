@@ -860,12 +860,14 @@ async def monitor_position(entry_price, side, position_data=None):
     max_profit_seen = 0.0
     # Adaptive stepped failsafe tiers: (trigger_profit, locked_floor)
     failsafe_tiers = [
-        (0.006, 0.006),   # Hit 0.6% → lock 0.6%
-        (0.010, 0.009),   # Hit 1.0% → lock 0.9%
-        (0.015, 0.014),   # Hit 1.5% → lock 1.4%
-        (0.018, 0.017),   # Hit 1.8% → lock 1.7%
-        (0.020, 0.019),   # Hit 2.0% → lock 1.9%
-    ]
+    (0.006, 0.004),   # Hit 0.6% → lock 0.4% (0.2% buffer za volatilnost)
+    (0.009, 0.007),   # Hit 0.9% → lock 0.7% (0.2% buffer)
+    (0.010, 0.008),   # Hit 1.0% → lock 0.8% (0.2% buffer) <- NOVI TIER
+    (0.012, 0.010),   # Hit 1.2% → lock 1.0% (0.2% buffer)
+    (0.016, 0.014),   # Hit 1.6% → lock 1.4% (0.2% buffer)
+    (0.020, 0.018),   # Hit 2.0% → lock 1.8% (0.2% buffer)
+    (0.024, 0.022),   # Hit 2.4% → lock 2.2% (0.2% buffer)
+]
     failsafe_floor = None  # Updated when higher tiers reached
 
     print(f"[POSITION MONITORING] {side} position: Entry ${entry_price:.6f}, Size: {btc_quantity:.6f} BTC (${position_size_usd:.2f})")
