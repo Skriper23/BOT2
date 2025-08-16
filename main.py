@@ -860,10 +860,11 @@ async def monitor_position(entry_price, side, position_data=None):
     max_profit_seen = 0.0
     # Adaptive stepped failsafe tiers: (trigger_profit, locked_floor)
     failsafe_tiers = [
-        (0.004, 0.003),   # Hit 0.4% → lock 0.3%
-        (0.007, 0.006),   # Hit 0.7% → lock 0.6%
+        (0.006, 0.006),   # Hit 0.6% → lock 0.6%
         (0.010, 0.009),   # Hit 1.0% → lock 0.9%
         (0.015, 0.014),   # Hit 1.5% → lock 1.4%
+        (0.018, 0.017),   # Hit 1.8% → lock 1.7%
+        (0.020, 0.019),   # Hit 2.0% → lock 1.9%
     ]
     failsafe_floor = None  # Updated when higher tiers reached
 
