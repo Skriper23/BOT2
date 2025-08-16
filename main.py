@@ -856,13 +856,14 @@ async def monitor_position(entry_price, side, position_data=None):
     
     # Position monitoring variables
     # Fixed take-profit target (non-trailing)
-    take_profit_target = 0.015  # 1.5%
+    take_profit_target = 0.025  # 2.5% (rijetko će se dosegnuti)
     max_profit_seen = 0.0
     # Adaptive stepped failsafe tiers: (trigger_profit, locked_floor)
     failsafe_tiers = [
-        (0.006, 0.006),   # Hit 0.60% -> lock 0.60%
-        (0.010, 0.010),   # Hit 1.00% -> lock 1.00%
-        (0.012, 0.012),   # Hit 1.20% -> lock 1.20%
+        (0.004, 0.003),   # Hit 0.4% → lock 0.3%
+        (0.007, 0.006),   # Hit 0.7% → lock 0.6%
+        (0.010, 0.009),   # Hit 1.0% → lock 0.9%
+        (0.015, 0.014),   # Hit 1.5% → lock 1.4%
     ]
     failsafe_floor = None  # Updated when higher tiers reached
 
